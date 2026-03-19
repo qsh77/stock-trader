@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .DS_Store
+config.json
 data/account.json
 data/account.json.bak
 data/analyzer.log*

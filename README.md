@@ -5,50 +5,41 @@ A股/港股/美股技术指标选股 + LLM 分析 + 模拟交易系统。
 ## 架构
 
 ```mermaid
-flowchart TB
+flowchart LR
     subgraph 数据源
-        AK[akshare<br/>A股/港股行情]
-        YF[yfinance<br/>美股行情]
+        AK[akshare<br/>A股/港股]
+        YF[yfinance<br/>美股]
     end
 
-    subgraph 选股引擎 [screener.py]
-        SL[股票池加载] --> CALC[技术指标计算<br/>MACD / MA / KDJ]
-        CALC --> STRAT[策略过滤<br/>金叉 / 多头 / 组合]
+    subgraph 选股引擎
+        SC[screener.py<br/>MACD / MA / KDJ]
     end
 
-    subgraph 三层漏斗 [auto_analyzer.py]
-        SCAN[本地扫描<br/>零 token] -->|信号列表| CHEAP[Cheap Model 初筛<br/>gpt-5.4-nano]
-        CHEAP -->|Top 5| SOTA[SOTA 深度分析<br/>gpt-5.4]
-        SOTA -->|买卖决策| EXEC[自动执行]
+    subgraph 三层漏斗
+        direction TB
+        L1[本地扫描<br/>零 token]
+        L2[Cheap Model 初筛]
+        L3[SOTA 深度分析]
+        L1 --> L2 --> L3
     end
 
-    subgraph 交易引擎 [trade.py]
-        BUY[买入]
-        SELL[卖出]
-        PORT[持仓查询]
-        ACCT[账户概览]
+    subgraph 交易引擎
+        TR[trade.py<br/>买入 / 卖出 / 持仓]
     end
 
-    subgraph 风控
-        RISK[日亏损熔断<br/>仓位上限<br/>止盈止损<br/>现金保留]
+    subgraph 存储
+        DB[(account.json)]
+        LG[(analyzer.log)]
     end
 
-    subgraph 存储 [data/]
-        ACC[(account.json)]
-        BAK[(account.json.bak)]
-        LOG[(analyzer.log)]
-    end
+    数据源 --> 选股引擎 --> 三层漏斗
+    三层漏斗 -->|买卖决策| 交易引擎
+    交易引擎 --> DB
+    三层漏斗 --> LG
+    数据源 --> 交易引擎
 
-    AK & YF --> SL
-    AK & YF --> BUY & SELL
-    STRAT --> SCAN
-    EXEC --> BUY & SELL
-    RISK -.->|拦截| SCAN & EXEC
-    BUY & SELL --> ACC
-    ACC -.->|备份| BAK
-    SCAN & CHEAP & SOTA --> LOG
-
-    CFG[config.json<br/>API / 费率 / 风控] -.-> 三层漏斗 & 交易引擎 & 风控
+    RISK[风控<br/>熔断/仓位/止盈止损] -.->|拦截| 三层漏斗 & 交易引擎
+    CFG[config.json] -.-> 三层漏斗 & 交易引擎 & RISK
 ```
 
 ## 快速开始

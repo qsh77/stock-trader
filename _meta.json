@@ -1,0 +1,7 @@
+{
+  "name": "stock-trader",
+  "version": "1.0.0",
+  "description": "A股/港股选股策略 + 模拟交易系统",
+  "author": "qsh",
+  "tags": ["finance", "stock", "trading", "a-shares"]
+}

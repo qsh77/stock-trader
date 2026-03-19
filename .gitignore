@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.DS_Store
+data/account.json
+data/account.json.bak
+data/analyzer.log*

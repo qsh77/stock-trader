@@ -61,6 +61,42 @@ python3 scripts/auto_analyzer.py
 
 三层漏斗自动运行：本地技术指标扫描（零 token）→ Cheap Model 初筛 → SOTA 逐只深度分析 → 自动买卖执行。
 
+## 在 OpenClaw 中使用
+
+### 安装
+
+Skill 目录位于 `~/.openclaw/workspace/skills/stock-trader/`，OpenClaw 启动时自动扫描 `skills/` 目录并加载 `SKILL.md`，无需额外注册。
+
+### 自然语言触发
+
+OpenClaw agent 根据 `SKILL.md` 中的指令映射表自动匹配：
+
+| 你说的话 | 执行的命令 |
+|---------|-----------|
+| "选股" / "扫描" | `screener.py --strategy combined` |
+| "选股 macd" / "选股 kdj" / "选股 均线" | 对应策略 |
+| "港股选股" | `screener.py --market hk` |
+| "美股选股" | `screener.py --market us` |
+| "买入 600519 100股" | `trade.py buy --code 600519 --shares 100` |
+| "买入 AAPL 10股" | `trade.py buy --code AAPL --shares 10` |
+| "持仓" / "仓位" | `trade.py portfolio` |
+| "账户" / "资金" | `trade.py account` |
+| "交易记录" | `trade.py history` |
+
+`SKILL.md` 中的 `{baseDir}` 会被自动替换为 skill 实际路径。
+
+### 自动分析定时任务
+
+`auto_analyzer.py` 可配合 OpenClaw 的 cron 在交易时段自动运行三层漏斗：
+
+```
+本地技术指标扫描（零 token）→ Cheap Model 初筛 → SOTA 深度分析 → 自动买卖
+```
+
+### 跨 Agent 协作
+
+支持多 agent 协调：后台 agent 定时跑 `auto_analyzer.py`，用 `agent-watch` skill 监控执行状态，主会话随时查询持仓和交易结果。
+
 ## 风控
 
 | 参数 | 默认值 | 说明 |

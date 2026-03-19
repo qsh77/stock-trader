@@ -80,8 +80,8 @@ cp config.example.json config.json
   "api": {
     "base_url": "https://api.openai.com/v1",
     "api_key": "your-api-key",
-    "cheap_model": "gpt-4o-mini",
-    "sota_model": "gpt-4o"
+    "cheap_model": "gpt-5.4-nano",       // 或 gemini-3-flash
+    "sota_model": "gpt-5.4"              // 或 claude-opus-4-6
   }
 }
 ```

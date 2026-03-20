@@ -96,6 +96,63 @@ def extract_json(text):
     return json.loads(text)
 
 
+def extract_response_text(resp):
+    text = getattr(resp, "output_text", None)
+    if text:
+        return text
+    parts = []
+    for item in getattr(resp, "output", []) or []:
+        content_list = getattr(item, "content", None)
+        if content_list is None and isinstance(item, dict):
+            content_list = item.get("content")
+        for content in content_list or []:
+            content_type = getattr(content, "type", None)
+            if content_type is None and isinstance(content, dict):
+                content_type = content.get("type")
+            if content_type != "output_text":
+                continue
+            part = getattr(content, "text", None)
+            if part is None and isinstance(content, dict):
+                part = content.get("text")
+            if part:
+                parts.append(part)
+    if parts:
+        return "".join(parts)
+    raise RuntimeError("responses API 未返回文本内容")
+
+
+def llm_call(model, prompt, temperature):
+    resp = client.responses.create(
+        model=model,
+        input=prompt,
+        temperature=temperature,
+    )
+    return extract_response_text(resp)
+
+
+def local_screen(signals, limit=5):
+    def score(item):
+        strategies = len(item.get("strategies") or [])
+        rsi = float(item.get("rsi") or 0)
+        j = float(item.get("j") or 0)
+        macd = float(item.get("macd") or 0)
+        score_value = strategies * 100
+        if 30 <= rsi <= 70:
+            score_value += 30
+        else:
+            score_value -= min(abs(rsi - 50), 30)
+        if 10 <= j <= 90:
+            score_value += 20
+        else:
+            score_value -= min(abs(j - 50) / 2, 20)
+        if macd > 0:
+            score_value += 10
+        return score_value
+
+    ranked = sorted(signals, key=score, reverse=True)
+    return ranked[:limit]
+
+
 def risk_check(market):
     acc = load_account(market)
     today = date.today().isoformat()
@@ -167,28 +224,27 @@ def scan_signals():
         log.info(f"  {market} 扫描完成，信号: {count}")
     return signals
 
-def llm_screen(signals):
+def llm_screen(signals, notices=None):
     if not signals:
         return []
     prompt = f"""你是股票分析助手。以下是技术指标扫描出的买入信号:
 {json.dumps(signals, ensure_ascii=False, indent=2)}
 
-从中筛选最值得深入分析的股票(最多5只)。优先选择:
+    从中筛选最值得深入分析的股票(最多5只)。优先选择:
 - 多个策略同时触发的
 - RSI 在 30-70 之间的
 - J 值在合理范围的
 
 只返回 JSON 数组，格式: ["code1", "code2"]"""
     try:
-        resp = client.chat.completions.create(
-            model=CFG["api"]["cheap_model"],
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1)
-        codes = extract_json(resp.choices[0].message.content)
+        codes = extract_json(llm_call(CFG["api"]["cheap_model"], prompt, 0.1))
         return [s for s in signals if s["code"] in codes]
     except Exception as e:
-        log.error(f"初筛失败: {e}")
-        return signals[:5]
+        msg = f"cheap model 当前不可用，已自动切换为本地保底筛选。原因: {e}"
+        log.warning(msg)
+        if notices is not None:
+            notices.append(msg)
+        return local_screen(signals, limit=5)
 
 
 def llm_analyze(item, action_type="buy"):
@@ -213,11 +269,7 @@ def llm_analyze(item, action_type="buy"):
 分析应止盈/止损/持有。返回JSON(不要markdown):
 {{"action":"sell"或"hold","code":"代码","shares":卖出股数,"confidence":0到100,"reason":"一句话结论","thesis":"2到4句详细分析","positives":["支持卖出或继续持有的依据1"],"risks":["风险1","风险2"],"plan":"后续处理计划"}}"""
     try:
-        resp = client.chat.completions.create(
-            model=CFG["api"]["sota_model"],
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2)
-        return extract_json(resp.choices[0].message.content)
+        return extract_json(llm_call(CFG["api"]["sota_model"], prompt, 0.2))
     except Exception as e:
         log.error(f"深度分析失败: {e}")
         return {"action": "skip", "reason": str(e)}
@@ -376,7 +428,7 @@ def _decision_price(item, signal_by_code, alert_by_code):
     return None
 
 
-def build_report(start_time, markets, alerts, signals, screened, decisions, risk_events=None):
+def build_report(start_time, markets, alerts, signals, screened, decisions, risk_events=None, notices=None):
     lines = []
     signal_by_code = {item["code"]: item for item in screened}
     alert_by_code = {item["code"]: item for item in alerts}
@@ -405,11 +457,19 @@ def build_report(start_time, markets, alerts, signals, screened, decisions, risk
     lines.append(f"• 未成交决策：{skipped} 笔")
     if blocked or risk_events:
         lines.append(f"• 风控拦截：{max(blocked, len(risk_events or []))} 笔")
+    if notices:
+        lines.append(f"• 模型降级：{len(notices)} 次")
 
     if risk_events:
         lines.append("")
         lines.append("风控事件")
         for item in risk_events[:8]:
+            lines.append(f"• {item}")
+
+    if notices:
+        lines.append("")
+        lines.append("模型告警")
+        for item in notices[:8]:
             lines.append(f"• {item}")
 
     if screened:
@@ -529,6 +589,7 @@ def run():
     markets = active_markets()
     decisions = []
     risk_events = []
+    notices = []
     log.info(f"=== Auto Analyzer 启动 ({start_time.strftime('%H:%M')}) ===")
 
     # 1. 检查持仓止盈止损
@@ -544,13 +605,13 @@ def run():
     signals = scan_signals()
     log.info(f"本地扫描到 {len(signals)} 个信号")
     if not signals:
-        report = build_report(start_time, markets, alerts, signals, [], decisions, risk_events)
+        report = build_report(start_time, markets, alerts, signals, [], decisions, risk_events, notices)
         log.info("=== 本轮完成 ===")
         print("\n" + report)
         return report
 
     # 3. Cheap model 初筛
-    screened = llm_screen(signals)
+    screened = llm_screen(signals, notices)
     log.info(f"初筛保留 {len(screened)} 个信号")
 
     # 4. SOTA 逐个深度分析
@@ -574,7 +635,7 @@ def run():
         decision["market"] = signal["market"]
         decisions.append(execute_decision(decision, name=signal.get("name")))
 
-    report = build_report(start_time, markets, alerts, signals, screened, decisions, risk_events)
+    report = build_report(start_time, markets, alerts, signals, screened, decisions, risk_events, notices)
     log.info("=== 本轮完成 ===")
     print("\n" + report)
     return report

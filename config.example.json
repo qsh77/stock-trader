@@ -2,8 +2,8 @@
   "api": {
     "base_url": "https://api.openai.com/v1",
     "api_key": "",
-    "cheap_model": "gpt-4o-mini",
-    "sota_model": "gpt-4o"
+    "cheap_model": "gpt-5.4-nano",
+    "sota_model": "gpt-5.4"
   },
   "fees": {
     "commission": 0.0003,
@@ -11,7 +11,7 @@
   },
   "scan": {
     "markets": ["a", "hk", "us"],
-    "strategies": ["macd", "ma", "kdj"],
+    "strategies": ["macd", "ma", "kdj", "combined"],
     "stock_count": 100,
     "signal_limit": 30
   },

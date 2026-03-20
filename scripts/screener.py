@@ -118,6 +118,32 @@ def s_combined(df):
 
 STRATEGIES = {"macd": s_macd, "ma": s_ma, "kdj": s_kdj, "combined": s_combined}
 
+def emit(payload, json_output=False):
+    if json_output:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(payload)
+
+def die(msg, json_output=False, **payload):
+    if json_output:
+        body = {"ok": False, "error": msg}
+        body.update(payload)
+        emit(body, json_output=True)
+    else:
+        print(f"❌ {msg}")
+    sys.exit(1)
+
+def normalize_args(limit, count, json_output=False):
+    if count <= 0:
+        die("--count 必须大于 0", json_output=json_output)
+    if limit <= 0:
+        die("--limit 必须大于 0", json_output=json_output)
+    if limit > count:
+        if not json_output:
+            print(f"⚠️ --limit={limit} 大于 --count={count}，已自动调整为 {count}")
+        limit = count
+    return limit, count
+
 def analyze(stock, market, fn):
     code, name = stock["代码"], stock["名称"]
     df = get_kline(code, market)
@@ -130,24 +156,67 @@ def analyze(stock, market, fn):
                 "J值": round(float(r["j"]), 1)}
     return None
 
-def run(market="a", strategy="combined", limit=20, count=100):
+def run(market="a", strategy="combined", limit=20, count=100, json_output=False):
+    started_at = time.time()
     fn = STRATEGIES.get(strategy)
-    if not fn: print(f"未知策略: {strategy}"); sys.exit(1)
+    if not fn:
+        die(f"未知策略: {strategy}", json_output=json_output, strategy=strategy)
+    limit, count = normalize_args(limit, count, json_output=json_output)
     market_name = {"a": "A股", "hk": "港股", "us": "美股"}[market]
-    print(f"📈 扫描{market_name} | 策略:{strategy} | 候选:{count}只")
-    stocks = get_stock_list(market, count)
+    if not json_output:
+        print(f"📈 扫描{market_name} | 策略:{strategy} | 候选:{count}只")
+    try:
+        stocks = get_stock_list(market, count)
+    except Exception as e:
+        die(f"获取{market_name}股票列表失败: {e}", json_output=json_output,
+            market=market, strategy=strategy, count=count, limit=limit)
+    if not stocks:
+        die(f"{market_name}股票列表为空", json_output=json_output,
+            market=market, strategy=strategy, count=count, limit=limit)
     results = []
+    failed = 0
+    processed = 0
     for i, s in enumerate(stocks):
-        if (i+1) % 20 == 0: print(f"  进度: {i+1}/{len(stocks)}")
+        if not json_output and (i + 1) % 20 == 0:
+            print(f"  进度: {i+1}/{len(stocks)}")
         try:
+            processed += 1
             r = analyze(s, market, fn)
             if r: results.append(r)
-        except Exception: pass
+        except Exception:
+            failed += 1
         if len(results) >= limit: break
-    if not results: print("未找到符合条件的股票。"); return
+    payload = {
+        "ok": True,
+        "market": market,
+        "market_name": market_name,
+        "strategy": strategy,
+        "requested_count": count,
+        "requested_limit": limit,
+        "candidate_count": len(stocks),
+        "processed": processed,
+        "failed": failed,
+        "matched": len(results),
+        "duration_ms": int((time.time() - started_at) * 1000),
+        "results": results,
+    }
+    if not results:
+        if json_output:
+            emit(payload, json_output=True)
+            return
+        msg = "未找到符合条件的股票。"
+        if failed:
+            msg += f" 其中 {failed} 只处理失败，可稍后重试。"
+        print(msg)
+        return
+    if json_output:
+        emit(payload, json_output=True)
+        return
     print(f"\n✅ 找到 {len(results)} 只符合 [{strategy}] 的股票:\n")
     for r in results:
         print(f"  {r['代码']} {r['名称']}  价格:{r['最新价']}  RSI:{r['RSI']}  J:{r['J值']}")
+    if failed:
+        print(f"\n⚠️ 有 {failed} 只股票在扫描中处理失败，结果未包含这些标的。")
     print(json.dumps(results, ensure_ascii=False, indent=2))
 
 if __name__ == "__main__":
@@ -156,5 +225,6 @@ if __name__ == "__main__":
     p.add_argument("--strategy", default="combined", choices=list(STRATEGIES))
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--count", type=int, default=100)
+    p.add_argument("--json", action="store_true", dest="json_output")
     a = p.parse_args()
-    run(a.market, a.strategy, a.limit, a.count)
+    run(a.market, a.strategy, a.limit, a.count, a.json_output)

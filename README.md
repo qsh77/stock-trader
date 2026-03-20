@@ -9,7 +9,7 @@ A股/港股/美股技术指标选股 + LLM 智能分析 + 模拟交易系统。
 - 多市场支持 — A股（沪深）、港股、美股，统一接口
 - 四种选股策略 — MACD 金叉、均线多头、KDJ 金叉、组合策略
 - 三层漏斗分析 — 本地扫描（零 token）→ Cheap Model 初筛 → SOTA 深度分析
-- 模拟交易引擎 — 买卖、持仓管理、盈亏统计、交易历史
+- 模拟交易引擎 — A股/港股/美股独立账户，各 5 万起始资金
 - 风控体系 — 仓位上限、日亏损熔断、止盈止损、现金保留
 - 自动化 — 支持定时任务，交易时段自动扫描 + 分析 + 执行
 - OpenClaw 集成 — 自然语言触发，结果推送 Telegram
@@ -40,7 +40,7 @@ flowchart LR
     end
 
     subgraph 存储
-        DB[(account.json)]
+        DB[(account.json<br/>a / hk / us)]
         LG[(analyzer.log)]
     end
 
@@ -64,7 +64,7 @@ flowchart LR
 ### 安装依赖
 
 ```bash
-pip install akshare yfinance openai
+pip install akshare yfinance openai pandas ta
 ```
 
 ### 配置
@@ -74,6 +74,8 @@ pip install akshare yfinance openai
 ```bash
 cp config.example.json config.json
 ```
+
+`screener.py` 可直接运行；`trade.py` 在缺少 `config.json` 时会使用默认费率；`auto_analyzer.py` 需要完整的 `config.json` 与 API Key。
 
 ```json
 {
@@ -109,6 +111,9 @@ python3 scripts/screener.py --market us --strategy kdj
 
 # 调整扫描范围
 python3 scripts/screener.py --count 200 --limit 30 --strategy combined
+
+# 结构化输出，适合 OpenClaw / agent 消费
+python3 scripts/screener.py --strategy combined --json
 ```
 
 **策略说明：**
@@ -119,6 +124,8 @@ python3 scripts/screener.py --count 200 --limit 30 --strategy combined
 | `ma` | 收盘价站上 MA5 且 MA5 > MA10 | 短期多头确认 |
 | `kdj` | 近 3 天 K 上穿 D，J < 90 | 超卖反弹 |
 | `combined` | MACD 金叉 + 均线多头同时满足 | 高确定性信号 |
+
+`--json` 模式会输出固定结构对象，包含执行状态、扫描统计和结果列表，适合上层 agent 直接解析。
 
 ### 模拟交易
 
@@ -132,8 +139,10 @@ python3 scripts/trade.py buy --code 00700 --shares 200     # 港股（腾讯）
 python3 scripts/trade.py sell --code 600519 --shares 50
 
 # 查询
-python3 scripts/trade.py portfolio                          # 当前持仓
-python3 scripts/trade.py account                            # 账户概览
+python3 scripts/trade.py portfolio                          # 三个账户当前持仓
+python3 scripts/trade.py portfolio --market us              # 只看美股账户
+python3 scripts/trade.py account                            # 三个账户概览 + 总览
+python3 scripts/trade.py account --market hk                # 只看港股账户
 python3 scripts/trade.py history                            # 全部交易记录
 python3 scripts/trade.py history --code AAPL                # 单只记录
 ```
@@ -201,13 +210,13 @@ python3 scripts/auto_analyzer.py
 | "买入 600519 100股" | 模拟买入 A 股 |
 | "买入 AAPL 10股" | 模拟买入美股 |
 | "卖出 00700 200股" | 模拟卖出港股 |
-| "持仓" / "仓位" | 查看当前持仓和盈亏 |
-| "账户" / "资金" | 查看账户总览 |
+| "持仓" / "仓位" | 查看三个独立账户持仓和盈亏 |
+| "账户" / "资金" | 查看三个独立账户总览 |
 | "交易记录" | 查看历史交易 |
 
 ### 定时自动化
 
-配合 OpenClaw cron 系统，可在交易时段自动运行分析：
+仓库当前只提供 `auto_analyzer.py` 脚本本体，不包含实际的 OpenClaw 定时任务定义文件。需要由外部调度在交易时段调用，例如：
 
 ```json
 {
@@ -234,7 +243,7 @@ stock-trader/
 │   ├── auto_analyzer.py   # 三层漏斗自动分析系统
 │   └── trade.py           # 模拟交易引擎
 ├── data/
-│   ├── account.json       # 账户数据（持仓/资金/历史）
+│   ├── account.json       # 三市场独立账户数据（a/hk/us）
 │   ├── account.json.bak   # 自动备份
 │   └── analyzer.log       # 分析日志（按天轮转）
 ├── config.json            # 运行配置（API/费率/风控/扫描）

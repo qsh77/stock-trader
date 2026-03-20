@@ -8,19 +8,11 @@ from openai import OpenAI
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from screener import STRATEGIES, calc, get_kline, get_stock_list
-from trade import cmd_buy, cmd_sell, get_price, load_account
+from trade import MARKET_LABELS, cmd_buy, cmd_sell, detect_market, get_price, load_account
 
 CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config.json")
-with open(CFG_PATH) as f:
-    CFG = json.load(f)
-
-client = OpenAI(
-    base_url=CFG["api"]["base_url"],
-    api_key=os.environ.get("STOCK_TRADER_API_KEY") or CFG["api"]["api_key"],
-    default_headers={
-        "User-Agent": "codex_cli_rs/0.77.0 (Windows 10.0.26100; x86_64) WindowsTerminal"
-    }
-)
+CFG = None
+client = None
 log = logging.getLogger("auto_analyzer")
 
 BJT = timezone(timedelta(hours=8))
@@ -33,6 +25,35 @@ MARKET_HOURS = {
     "hk": {"tz": BJT, "hours": (9, 17)},   # 港股 9:30-16:00，放宽到 9-17
     "us": {"tz": EST, "hours": (9, 17)},    # 美股 9:30-16:00 ET
 }
+
+def load_cfg():
+    if not os.path.exists(CFG_PATH):
+        raise RuntimeError(f"缺少配置文件: {CFG_PATH}。请先复制 config.example.json 为 config.json")
+    try:
+        with open(CFG_PATH) as f:
+            cfg = json.load(f)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"配置文件格式错误: {CFG_PATH} | {e}") from e
+    api = cfg.get("api") or {}
+    if not api.get("base_url"):
+        raise RuntimeError("config.json 缺少 api.base_url")
+    if not api.get("cheap_model") or not api.get("sota_model"):
+        raise RuntimeError("config.json 缺少 cheap_model 或 sota_model")
+    return cfg
+
+def init_runtime():
+    global CFG, client
+    CFG = load_cfg()
+    api_key = os.environ.get("STOCK_TRADER_API_KEY") or (CFG.get("api") or {}).get("api_key")
+    if not api_key:
+        raise RuntimeError("缺少 API Key。请设置 STOCK_TRADER_API_KEY 或 config.json.api.api_key")
+    client = OpenAI(
+        base_url=CFG["api"]["base_url"],
+        api_key=api_key,
+        default_headers={
+            "User-Agent": "codex_cli_rs/0.77.0 (Windows 10.0.26100; x86_64) WindowsTerminal"
+        }
+    )
 
 
 def active_markets():
@@ -72,8 +93,8 @@ def extract_json(text):
     return json.loads(text)
 
 
-def risk_check():
-    acc = load_account()
+def risk_check(market):
+    acc = load_account(market)
     today = date.today().isoformat()
     daily_loss = sum(r.get("profit", 0) for r in acc["history"]
                      if r["time"].startswith(today) and r["action"] == "sell")
@@ -81,29 +102,30 @@ def risk_check():
         (get_price(c)[0] or p["avg_cost"]) * p["shares"]
         for c, p in acc["positions"].items())
     if daily_loss < -(total * CFG["risk"]["max_daily_loss_pct"]):
-        log.warning(f"日亏损熔断: {daily_loss:.2f}")
+        log.warning(f"{MARKET_LABELS[market]}账户日亏损熔断: {daily_loss:.2f}")
         return False
     if acc["cash"] < CFG["risk"]["min_cash_reserve"]:
-        log.warning(f"现金不足: {acc['cash']:.2f}")
+        log.warning(f"{MARKET_LABELS[market]}账户现金不足: {acc['cash']:.2f}")
         return False
     return True
 
 def check_positions():
-    acc = load_account()
     alerts = []
-    for code, pos in acc["positions"].items():
-        cur_price, _ = get_price(code)
-        if cur_price is None:
-            continue
-        pct = (cur_price - pos["avg_cost"]) / pos["avg_cost"]
-        threshold = CFG["risk"]["stop_loss_pct"]
-        if abs(pct) >= threshold:
-            alerts.append({
-                "code": code, "name": pos["name"], "shares": pos["shares"],
-                "avg_cost": pos["avg_cost"], "cur_price": cur_price,
-                "pct": round(pct * 100, 2),
-                "type": "take_profit" if pct > 0 else "stop_loss"
-            })
+    for market in MARKET_LABELS:
+        acc = load_account(market)
+        for code, pos in acc["positions"].items():
+            cur_price, _ = get_price(code)
+            if cur_price is None:
+                continue
+            pct = (cur_price - pos["avg_cost"]) / pos["avg_cost"]
+            threshold = CFG["risk"]["stop_loss_pct"]
+            if abs(pct) >= threshold:
+                alerts.append({
+                    "code": code, "name": pos["name"], "shares": pos["shares"],
+                    "avg_cost": pos["avg_cost"], "cur_price": cur_price,
+                    "pct": round(pct * 100, 2), "market": market,
+                    "type": "take_profit" if pct > 0 else "stop_loss"
+                })
     return alerts
 
 
@@ -167,7 +189,8 @@ def llm_screen(signals):
 
 
 def llm_analyze(item, action_type="buy"):
-    acc = load_account()
+    market = item.get("market") or detect_market(item["code"])
+    acc = load_account(market)
     total = acc["cash"] + sum(
         (get_price(c)[0] or p["avg_cost"]) * p["shares"]
         for c, p in acc["positions"].items())
@@ -177,7 +200,7 @@ def llm_analyze(item, action_type="buy"):
         prompt = f"""你是专业股票分析师。分析以下买入信号:
 {json.dumps(item, ensure_ascii=False)}
 
-账户: 可用资金 {acc['cash']:.0f}, 总资产 {total:.0f}, 单只最大仓位 {max_pos:.0f}
+账户: {MARKET_LABELS[market]}独立账户，可用资金 {acc['cash']:.0f}, 总资产 {total:.0f}, 单只最大仓位 {max_pos:.0f}
 综合技术面给出决策。返回JSON(不要markdown):
 {{"action":"buy"或"skip","code":"代码","shares":股数(100整数倍),"reason":"理由"}}"""
     else:
@@ -199,14 +222,15 @@ def llm_analyze(item, action_type="buy"):
 def execute_decision(decision, name=None):
     action = decision.get("action")
     code = decision.get("code")
+    market = decision.get("market") or (detect_market(code) if code else None)
     shares = decision.get("shares", 0)
     reason = decision.get("reason", "")
     if action == "buy" and shares > 0:
-        log.info(f"执行买入: {code} {name or ''} x {shares} | {reason}")
+        log.info(f"执行买入: [{MARKET_LABELS.get(market, '?')}] {code} {name or ''} x {shares} | {reason}")
         result = cmd_buy(code, shares)
         log.info(f"买入结果: {'成功' if result else '失败'}")
     elif action == "sell" and shares > 0:
-        log.info(f"执行卖出: {code} {name or ''} x {shares} | {reason}")
+        log.info(f"执行卖出: [{MARKET_LABELS.get(market, '?')}] {code} {name or ''} x {shares} | {reason}")
         result = cmd_sell(code, shares)
         log.info(f"卖出结果: {'成功' if result else '失败'}")
     else:
@@ -214,6 +238,7 @@ def execute_decision(decision, name=None):
 
 
 def run():
+    init_runtime()
     LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
     os.makedirs(LOG_DIR, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s [%(name)s] %(message)s")
@@ -223,10 +248,6 @@ def run():
     sh.setFormatter(fmt)
     logging.basicConfig(level=logging.INFO, handlers=[sh, fh])
     log.info(f"=== Auto Analyzer 启动 ({datetime.now(BJT).strftime('%H:%M')}) ===")
-
-    if not risk_check():
-        log.info("风控拦截，本轮跳过")
-        return
 
     # 1. 检查持仓止盈止损
     alerts = check_positions()
@@ -249,14 +270,19 @@ def run():
 
     # 4. SOTA 逐个深度分析
     for signal in screened:
-        if not risk_check():
-            log.info("风控拦截，停止买入")
-            break
+        if not risk_check(signal["market"]):
+            log.info(f"{MARKET_LABELS[signal['market']]}账户风控拦截，跳过买入 {signal['code']}")
+            continue
         decision = llm_analyze(signal, action_type="buy")
+        decision["market"] = signal["market"]
         execute_decision(decision, name=signal.get("name"))
 
     log.info("=== 本轮完成 ===")
 
 
 if __name__ == "__main__":
-    run()
+    try:
+        run()
+    except Exception as e:
+        print(f"\n⚠️ Stock Trader 自动分析失败 ⚠️\n错误: {e}\n请检查 API 配置或网络连接。")
+        raise
